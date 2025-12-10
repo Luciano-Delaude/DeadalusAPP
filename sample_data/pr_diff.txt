@@ -1,0 +1,2022 @@
+diff --git a/changelog.md b/changelog.md
+index 6fd1a17..42678ce 100644
+--- a/changelog.md
++++ b/changelog.md
+@@ -1,20 +1,25 @@
+ # Data Frame History Store - Changelog
+ 
+-### 0.1.0 - 05-06-2020
++### 0.1.0 - 2020-05-06
+ 
+ * Initial version. Support for snapshot archives in main-memory and on file system.
+ 
+ 
+-### 0.1.1 - 06-16-2020
++### 0.1.1 - 2020-06-16
+ 
+ * Allow different types of input documents (e.g., CSV files or Json)
+ * External merge-sort for large CSV files.
+ * Add managers for maintaining sets of archives
+ 
+ 
+-### 0.1.2 - 06-25-2020
++### 0.1.2 - 2020-06-25
+ 
+ * Proper handling of date/time objects by the default archive reader and writer
+ * Optional arguments for Json encoder and decoder for persistent archives
+ * Add encoder and decoder information to archive manager metadata
+ * Simple command-line interface for persistent archive manager
++
++
++### 0.1.3 - 2020-10-05
++
++* Add archive manager that maintains descriptors in a relational database (\#8)
+diff --git a/histore/__init__.py b/histore/__init__.py
+index c2f6ffa..a555b8f 100644
+--- a/histore/__init__.py
++++ b/histore/__init__.py
+@@ -6,4 +6,4 @@
+ # file LICENSE for full license details.
+ 
+ from histore.archive.base import Archive, PersistentArchive  # noqa: F401
+-from histore.archive.manager.fs import PersistentArchiveManager  # noqa: F401
++from histore.archive.manager.persist import PersistentArchiveManager  # noqa: F401, E501
+diff --git a/histore/archive/base.py b/histore/archive/base.py
+index 026d861..2df0dc2 100644
+--- a/histore/archive/base.py
++++ b/histore/archive/base.py
+@@ -181,11 +181,7 @@ class histore.document.schema.Column.
+                     origin = last_snapshot.version
+             # Get a modified snapshot list where the last entry represents the
+             # new snapshot.
+-            snapshots = self.snapshots().append(
+-                valid_time=valid_time,
+-                description=description
+-            )
+-            version = snapshots.last_snapshot().version
++            version = self.snapshots().next_version()
+             # Merge the new snapshot schema with the current archive schema.
+             schema, matched_columns, unchanged_columns = self.schema().merge(
+                 columns=doc.columns,
+@@ -220,9 +216,15 @@ class histore.document.schema.Column.
+             # for cleanup of temporary files.
+             doc.close()
+         # Commit all changes to the associated archive store.
+-        self.store.commit(schema=schema, writer=writer, snapshots=snapshots)
++        snapshot = self.store.commit(
++            schema=schema,
++            writer=writer,
++            version=version,
++            valid_time=valid_time,
++            description=description
++        )
+         # Return descriptor for the created snapshot.
+-        return snapshots.last_snapshot()
++        return snapshot
+ 
+     def diff(self, original_version, new_version):
+         """Get provenance information representing the difference between two
+diff --git a/histore/archive/manager/base.py b/histore/archive/manager/base.py
+index 390ae29..7247e97 100644
+--- a/histore/archive/manager/base.py
++++ b/histore/archive/manager/base.py
+@@ -8,6 +8,10 @@
+ """Abstract class for managers that maintain a set of archives."""
+ 
+ from abc import ABCMeta, abstractmethod
++from typing import Dict, List, Optional, Union
++
++from histore.archive.base import Archive
++from histore.archive.manager.descriptor import ArchiveDescriptor
+ 
+ 
+ class ArchiveManager(metaclass=ABCMeta):  # pragma: no cover
+@@ -17,7 +21,7 @@ class ArchiveManager(metaclass=ABCMeta):  # pragma: no cover
+     maintained in an archive descriptor.
+     """
+     @abstractmethod
+-    def archives(self):
++    def archives(self) -> Dict[str, ArchiveDescriptor]:
+         """Get dictionary of archive descriptors. The returned dictionary maps
+         archive identifier to their descriptor.
+ 
+@@ -27,7 +31,7 @@ def archives(self):
+         """
+         raise NotImplementedError()
+ 
+-    def contains(self, identifier):
++    def contains(self, identifier: str) -> bool:
+         """Returns True if an archive with the given identifier exists.
+ 
+         Parameters
+@@ -43,10 +47,12 @@ def contains(self, identifier):
+ 
+     @abstractmethod
+     def create(
+-        self, name=None, description=None, primary_key=None, encoder=None,
+-        decoder=None
+-    ):
+-        """Create a new archive object.
++        self, name: Optional[str] = None, description: Optional[str] = None,
++        primary_key: Optional[Union[List[str], str]] = None,
++        encoder: Optional[str] = None, decoder: Optional[str] = None
++    ) -> ArchiveDescriptor:
++        """Create a new archive object. Raises a ValueError if an archive with
++        the given name exists.
+ 
+         Parameters
+         ----------
+@@ -67,11 +73,15 @@ def create(
+         Returns
+         -------
+         histore.archive.manager.descriptor.ArchiveDescriptor
++
++        Raises
++        ------
++        ValueError
+         """
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def delete(self, identifier):
++    def delete(self, identifier: str):
+         """Delete the archive with the given identifier.
+ 
+         Parameters
+@@ -82,7 +92,7 @@ def delete(self, identifier):
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def get(self, identifier):
++    def get(self, identifier: str) -> Archive:
+         """Get the archive that is associated with the given identifier. Raises
+         a ValueError if the identifier is unknown.
+ 
+@@ -101,7 +111,7 @@ def get(self, identifier):
+         """
+         raise NotImplementedError()
+ 
+-    def get_by_name(self, name):
++    def get_by_name(self, name: str) -> ArchiveDescriptor:
+         """Get descriptor for the archive with the given name. If no archive
+         with that name exists None is returned.
+ 
+@@ -119,7 +129,7 @@ def get_by_name(self, name):
+                 return archive
+         return None
+ 
+-    def list(self):
++    def list(self) -> List[ArchiveDescriptor]:
+         """Get the list of descriptors for the maintained archives.
+ 
+         Returns
+@@ -129,7 +139,7 @@ def list(self):
+         return list(self.archives().values())
+ 
+     @abstractmethod
+-    def rename(self, identifier, name):
++    def rename(self, identifier: str, name: str):
+         """Rename the specified archive. Raises a ValueError if the identifier
+         is unknown or if an archive with the given name exist.
+ 
+diff --git a/histore/archive/manager/db/__init__.py b/histore/archive/manager/db/__init__.py
+new file mode 100644
+index 0000000..d319c41
+--- /dev/null
++++ b/histore/archive/manager/db/__init__.py
+@@ -0,0 +1,6 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
+diff --git a/histore/archive/manager/db/base.py b/histore/archive/manager/db/base.py
+new file mode 100644
+index 0000000..c393687
+--- /dev/null
++++ b/histore/archive/manager/db/base.py
+@@ -0,0 +1,233 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
++
++"""Manager for archives that maintains all archive metadata in a relational
++database.
++"""
++
++import os
++import shutil
++
++from sqlalchemy.exc import SQLAlchemyError
++from typing import Dict, List, Optional, Union
++
++from histore.archive.base import PersistentArchive
++from histore.archive.manager.base import ArchiveManager
++from histore.archive.manager.db.database import DB
++from histore.archive.manager.db.model import Archive, ArchiveKey
++from histore.archive.manager.descriptor import ArchiveDescriptor
++
++import histore.config as config
++import histore.util as util
++
++
++class DBArchiveManager(ArchiveManager):
++    """The database archive manager maintains a set of archives on disk. The
++    list of archive descriptors is maintained in a relational database.
++    """
++    def __init__(
++        self, basedir: Optional[str] = None, db: Optional[DB] = None,
++        create: Optional[bool] = False
++    ):
++        """Initialize the base directory under which all archives are stored in
++        individual sub-folders and the database connection object for archive
++        descriptors.
++
++        If the base directory is not given the value will be read from the
++        environment variable HISTORE_BASEDIR. If the database is not given
++        the connection string will be read from the environment variable
++        HISTORE_DBCONNECT.
++
++        Parameters
++        ----------
++        basedir: string, default=None
++            Path to dorectory on disk where archives are maintained.
++        db: histore.archive.manager.db.database.DB, default=None
++            Database connection object.
++        create: bool, default=False
++            Create a fresh database and delete all files in the base directory
++            if True.
++        """
++        # Initialize the base directory.
++        if basedir is None:
++            basedir = config.BASEDIR()
++        self.basedir = basedir
++        # Initialize the database connector.
++        if db is None:
++            db = DB(connect_url=config.DBCONNECT())
++        self.db = db
++        if create:
++            # Create a fresh database instance.
++            db.init()
++            # Clear all files in the base directory if it exists.
++            if os.path.isdir(self.basedir):
++                util.cleardir(self.basedir)
++        # Create the base directory (if it does not exist).
++        util.createdir(basedir)
++
++    def archives(self) -> Dict[str, ArchiveDescriptor]:
++        """Get dictionary of archive descriptors. The returned dictionary maps
++        archive identifier to their descriptor.
++
++        Returns
++        -------
++        dict(string: histore.archive.manager.descriptor.ArchiveDescriptor)
++        """
++        archives = dict()
++        with self.db.session() as session:
++            for arch in session.query(Archive).all():
++                archives[arch.archive_id] = arch.descriptor()
++        return archives
++
++    def create(
++        self, name: str = None, description: Optional[str] = None,
++        primary_key: Optional[Union[List[str], str]] = None,
++        encoder: Optional[str] = None, decoder: Optional[str] = None
++    ) -> ArchiveDescriptor:
++        """Create a new archive object. Raises a ValueError if an archive with
++        the given name exists.
++
++        Parameters
++        ----------
++        name: string, default=None
++            Descriptive name that is associated with the archive.
++        description: string, default=None
++            Optional long description that is associated with the archive.
++        primary_key: string or list, default=None
++            Column(s) that are used to generate identifier for rows in the
++            archive.
++        encoder: string, default=None
++            Full package path for the Json encoder class that is used by the
++            persistent archive.
++        decoder: string, default=None
++            Full package path for the Json decoder function that is used by the
++
++        Returns
++        -------
++        histore.archive.manager.descriptor.ArchiveDescriptor
++
++        Raises
++        ------
++        ValueError
++        """
++        try:
++            with self.db.session() as session:
++                archive = Archive(
++                    name=name,
++                    description=description,
++                    encoder=encoder,
++                    decoder=decoder
++                )
++                if primary_key is not None:
++                    if isinstance(primary_key, str):
++                        primary_key = [primary_key]
++                    for pos, colname in enumerate(primary_key):
++                        key = ArchiveKey(name=colname, pos=pos)
++                        archive.keyspec.append(key)
++                session.add(archive)
++                session.commit()
++                return archive.descriptor()
++        except SQLAlchemyError as ex:
++            raise ValueError(ex)
++
++    def delete(self, identifier: str):
++        """Delete the archive with the given identifier.
++
++        Parameters
++        ----------
++        identifier: string
++            Unique archive identifier
++        """
++        with self.db.session() as session:
++            # Query database to ensure that the archive exists.
++            archive = session\
++                .query(Archive)\
++                .filter(Archive.archive_id == identifier)\
++                .one_or_none()
++            if archive is None:
++                return
++            # Remove the archive base directory and the entry in the database.
++            archdir = os.path.join(self.basedir, identifier)
++            if os.path.isdir(archdir):
++                shutil.rmtree(archdir)
++            session.delete(archive)
++
++    def get(self, identifier: str) -> PersistentArchive:
++        """Get the archive that is associated with the given identifier. Raises
++        a ValueError if the identifier is unknown.
++
++        Parameters
++        ----------
++        identifier: string
++            Unique archive identifier
++
++        Returns
++        -------
++        histore.archive.base.Archive
++
++        Raises
++        ------
++        ValueError
++        """
++        with self.db.session() as session:
++            # Query database to ensure that the archive exists.
++            archive = session\
++                .query(Archive)\
++                .filter(Archive.archive_id == identifier)\
++                .one_or_none()
++            if archive is None:
++                raise ValueError('unknown archive {}'.format(identifier))
++            # Get the archive descriptor and close the database connection.
++            desc = archive.descriptor()
++        archdir = os.path.join(self.basedir, identifier)
++        primary_key = desc.primary_key()
++        # Load JSONEncoder class if encoder is contained in the descriptor.
++        if desc.encoder() is not None:
++            encoder = util.import_obj(desc.encoder())
++        else:
++            encoder = None
++        # Load the corresponding Json decoder function if a decoder is
++        # contained in the descriptor.
++        if desc.decoder() is not None:
++            decoder = util.import_obj(desc.decoder())
++        else:
++            decoder = None
++        return PersistentArchive(
++            basedir=archdir,
++            primary_key=primary_key,
++            encoder=encoder,
++            decoder=decoder
++        )
++
++    def rename(self, identifier: str, name: str):
++        """Rename the specified archive. Raises a ValueError if the identifier
++        is unknown or if an archive with the given name exist.
++
++        Parameters
++        ----------
++        identifier: string
++            Unique archive identifier
++        name: string
++            New archive name.
++
++        Raises
++        ------
++        ValueError
++        """
++        try:
++            with self.db.session() as session:
++                # Query database to ensure that the archive exists.
++                archive = session\
++                    .query(Archive)\
++                    .filter(Archive.archive_id == identifier)\
++                    .one_or_none()
++                if archive is None:
++                    raise ValueError('unknown archive {}'.format(identifier))
++                # Update the archive name in the database.
++                archive.name = name
++        except SQLAlchemyError as ex:
++            raise ValueError(ex)
+diff --git a/histore/archive/manager/db/database.py b/histore/archive/manager/db/database.py
+new file mode 100644
+index 0000000..24efdb5
+--- /dev/null
++++ b/histore/archive/manager/db/database.py
+@@ -0,0 +1,114 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
++
++"""Wrapper for database connections. The wrapper is used to open database
++sessions as well as to create a fresh database.
++"""
++
++from sqlalchemy import create_engine
++from sqlalchemy.orm import sessionmaker, scoped_session
++
++from typing import Optional
++
++from histore.archive.manager.db.model import Base
++
++
++"""Database connection Url for test purposes."""
++TEST_URL = 'sqlite:///:memory:'
++
++
++class DB(object):
++    """Wrapper to establish a database connection and create the database
++    schema.
++    """
++    def __init__(
++        self, connect_url: str, web_app: Optional[bool] = False,
++        echo: Optional[bool] = False
++    ):
++        """Initialize the database connection string.
++        Parameters
++        ----------
++        connect_url: string
++            Database connection string.
++        web_app: bool, default=False
++            Use scoped sessions for web applications if set to True.
++        echo: bool, default=False
++            Flag that controlls whether the created engine is verbose or not.
++
++        Raises
++        ------
++        flowserv.error.MissingConfigurationError
++        """
++        # Ensure that the connection URL is set.
++        if echo:
++            import logging
++            logging.info('Connect to database Url %s' % (connect_url))
++        self._engine = create_engine(connect_url, echo=echo)
++        if web_app:
++            self._session = scoped_session(sessionmaker(bind=self._engine))
++        else:
++            self._session = sessionmaker(bind=self._engine)
++
++    def init(self):
++        """Create all tables in the database model schema."""
++        # Add import for modules that contain ORM definitions.
++        import histore.archive.manager.db.model  # noqa: F401
++        # Drop all tables first before creating them
++        Base.metadata.drop_all(self._engine)
++        Base.metadata.create_all(self._engine)
++
++    def session(self):
++        """Create a new database session instance. The sessoin is wrapped by a
++        context manager to properly manage the session scope.
++
++        Returns
++        -------
++        flowserv.model.database.SessionScope
++        """
++        return SessionScope(self._session())
++
++
++class SessionScope(object):
++    """Context manager for providing transactional scope around a series of
++    database operations.
++    """
++    def __init__(self, session):
++        """Initialize the database session.
++
++        Parameters
++        ----------
++        session: sqlalchemy.orm.session.Session
++            Database session.
++        """
++        self.session = session
++
++    def __enter__(self):
++        """Return the managed database session object.
++
++        Returns
++        -------
++        sqlalchemy.orm.session.Session
++        """
++        return self.session
++
++    def __exit__(self, exc_type, exc_value, exc_traceback):
++        """Commit or rollback transaction depending on the exception type.
++        Does not surpress any exceptions.
++        """
++        if exc_type is None:
++            try:
++                self.session.commit()
++            except Exception:
++                self.session.rollback()
++                raise
++            finally:
++                self.session.close()
++        else:
++            try:
++                self.session.rollback()
++            finally:
++                self.session.close()
+diff --git a/histore/archive/manager/db/model.py b/histore/archive/manager/db/model.py
+new file mode 100644
+index 0000000..ea297e8
+--- /dev/null
++++ b/histore/archive/manager/db/model.py
+@@ -0,0 +1,86 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
++
++from sqlalchemy import Integer, String, Text
++from sqlalchemy import Column, ForeignKey
++from sqlalchemy.ext.declarative import declarative_base
++from sqlalchemy.orm import relationship
++
++from histore.archive.manager.descriptor import ArchiveDescriptor
++
++import histore.util as util
++
++
++# -- ORM Model ----------------------------------------------------------------
++
++"""Base class for all database tables."""
++
++Base = declarative_base()
++
++
++class Archive(Base):
++    """ORM for maintaining archive descriptors in a relational database."""
++    # -- Schema ---------------------------------------------------------------
++    __tablename__ = 'archive'
++
++    archive_id = Column(
++        String(32),
++        default=util.get_unique_identifier,
++        primary_key=True
++    )
++    name = Column(String(1024), nullable=False, unique=True)
++    created_at = Column(String(32), nullable=False, default=util.current_time)
++    description = Column(Text)
++    encoder = Column(String(1024))
++    decoder = Column(String(1024))
++
++    # -- Relationships --------------------------------------------------------
++    keyspec = relationship(
++        'ArchiveKey',
++        back_populates='archive',
++        cascade='all, delete, delete-orphan'
++    )
++
++    def descriptor(self) -> ArchiveDescriptor:
++        """Get descriptor for the archive database object.
++
++        Returns
++        -------
++        histore.archive.manager.descriptor.ArchiveDescriptor
++        """
++        # Create list of promary key columns (if defined).
++        if self.keyspec:
++            pk = [k.name for k in sorted(self.keyspec, key=lambda x: x.pos)]
++        else:
++            pk = None
++        return ArchiveDescriptor.create(
++            identifier=self.archive_id,
++            name=self.name,
++            description=self.description,
++            primary_key=pk,
++            encoder=self.encoder,
++            decoder=self.decoder
++        )
++
++
++class ArchiveKey(Base):
++    """Column in the primary key definition for an archive. Each element in the
++    primary key has a unique (column) name and the key position.
++    """
++    # -- Schema ---------------------------------------------------------------
++    __tablename__ = 'archive_key'
++
++    archive_id = Column(
++        String(32),
++        ForeignKey('archive.archive_id'),
++        primary_key=True
++    )
++    name = Column(String(1024), primary_key=True)
++    pos = Column(Integer, primary_key=True)
++
++    # -- Relationships --------------------------------------------------------
++    archive = relationship('Archive', back_populates='keyspec')
+diff --git a/histore/archive/manager/descriptor.py b/histore/archive/manager/descriptor.py
+index 7ed404b..ddf39fe 100644
+--- a/histore/archive/manager/descriptor.py
++++ b/histore/archive/manager/descriptor.py
+@@ -11,6 +11,9 @@
+ 
+ import jsonschema
+ 
++from datetime import datetime
++from typing import Dict, List, Optional, Union
++
+ import histore.util as util
+ 
+ 
+@@ -38,7 +41,7 @@ class ArchiveDescriptor(object):
+     """Wrapper around an archive descriptor dictionary object. This class
+     provides access to descriptor property values and their defaults.
+     """
+-    def __init__(self, doc, validate=True):
++    def __init__(self, doc: Dict, validate: Optional[bool] = True):
+         """Initialize the dictionary containing the archive descriptor.
+         Validates the document against the descriptor schema if the validate
+         flag is True. Raises a ValidationError if validation fails.
+@@ -62,13 +65,17 @@ def __init__(self, doc, validate=True):
+ 
+     @staticmethod
+     def create(
+-        name=None, description=None, primary_key=None, encoder=None,
+-        decoder=None
++        identifier: Optional[str] = None, name: Optional[str] = None,
++        description: Optional[str] = None,
++        primary_key: Optional[Union[List[str], str]] = None,
++        encoder: Optional[str] = None, decoder: Optional[str] = None
+     ):
+         """Create a new archive descriptor object.
+ 
+         Parameters
+         ----------
++        identifier: string, default=None
++            Unique archive identifier.
+         name: string, default=None
+             Descriptive name that is associated with the archive.
+         description: string, default=None
+@@ -90,9 +97,10 @@ def create(
+         if primary_key is not None and not isinstance(primary_key, list):
+             primary_key = [primary_key]
+         # Create a unique identifier for the new archive.
+-        identifier = util.get_unique_identifier()
++        if identifier is None:
++            identifier = util.get_unique_identifier()
+         # Create the archive descriptor.
+-        doc = {'id': identifier, 'createdAt': util.utc_now().isoformat()}
++        doc = {'id': identifier, 'createdAt': util.current_time()}
+         if name is not None:
+             doc['name'] = name
+         if description is not None:
+@@ -105,7 +113,7 @@ def create(
+             doc['decoder'] = decoder
+         return ArchiveDescriptor(doc)
+ 
+-    def created_at(self):
++    def created_at(self) -> datetime:
+         """Get creating timestamp for the archive.
+ 
+         Returns
+@@ -114,7 +122,7 @@ def created_at(self):
+         """
+         return util.to_datetime(self.doc.get('createdAt'))
+ 
+-    def decoder(self):
++    def decoder(self) -> str:
+         """Get package path for Json decoder used by persistent archives.
+ 
+         Returns
+@@ -123,7 +131,7 @@ def decoder(self):
+         """
+         return self.doc.get('decoder')
+ 
+-    def description(self):
++    def description(self) -> str:
+         """Get archive description. If the value is not set in the descriptor
+         an empty string is returned as default.
+ 
+@@ -133,7 +141,7 @@ def description(self):
+         """
+         return self.doc.get('description', '')
+ 
+-    def encoder(self):
++    def encoder(self) -> str:
+         """Get package path for Json encoder used by persistent archives.
+ 
+         Returns
+@@ -142,7 +150,7 @@ def encoder(self):
+         """
+         return self.doc.get('encoder')
+ 
+-    def identifier(self):
++    def identifier(self) -> str:
+         """Get the unique archive identifier value.
+ 
+         Returns
+@@ -151,7 +159,7 @@ def identifier(self):
+         """
+         return self.doc['id']
+ 
+-    def name(self):
++    def name(self) -> str:
+         """Get the archive name. If the value is not set in the descriptor the
+         identifier is returned as default.
+ 
+@@ -161,7 +169,7 @@ def name(self):
+         """
+         return self.doc.get('name', self.identifier())
+ 
+-    def primary_key(self):
++    def primary_key(self) -> List[str]:
+         """Get list of primary key attributes.
+ 
+         Returns
+@@ -170,7 +178,7 @@ def primary_key(self):
+         """
+         return self.doc.get('primaryKey')
+ 
+-    def rename(self, name):
++    def rename(self, name: str):
+         """Update the name of the archive.
+ 
+         Parameters
+diff --git a/histore/archive/manager/fs.py b/histore/archive/manager/fs.py
+index b400b56..13490b0 100644
+--- a/histore/archive/manager/fs.py
++++ b/histore/archive/manager/fs.py
+@@ -11,6 +11,8 @@
+ import os
+ import shutil
+ 
++from typing import Dict, List, Optional, Union
++
+ from histore.archive.base import PersistentArchive
+ from histore.archive.manager.base import ArchiveManager
+ from histore.archive.manager.descriptor import ArchiveDescriptor
+@@ -19,11 +21,13 @@
+ import histore.util as util
+ 
+ 
+-class PersistentArchiveManager(ArchiveManager):
++class FileSystemArchiveManager(ArchiveManager):
+     """The persistent archive manager maintains a set of archives on disk. The
+     list of archive descriptors is also maintained on disk as a Json file.
+     """
+-    def __init__(self, basedir=None, exists=False):
++    def __init__(
++        self, basedir: Optional[str] = None, create: Optional[bool] = False
++    ):
+         """Initialize the base directory under which all archives are stored in
+         individual sub-folders. If the base directory is not given the value
+         will be read from the environment variable HISTORE_BASEDIR or the
+@@ -35,35 +39,30 @@ def __init__(self, basedir=None, exists=False):
+         ----------
+         basedir: string
+             Path to dorectory on disk where archives are maintained.
+-        exists: bool, default=False
+-            Raise an error if the given base directory is not empty or contains
+-            the descriptor file.
++        create: bool, default=False
++            Create a fresh instance of the archive manager if True. This will
++            delete all files in the base directory.
+         """
+         if basedir is None:
+             basedir = config.BASEDIR()
++        self.basedir = basedir
+         # Initialize path to file that maintains archive descriptors.
+-        self.descriptorfile = os.path.join(basedir, 'archives.json')
+-        exists_descriptorfile = os.path.isfile(self.descriptorfile)
+-        # Raise error if the archive manager base directory is expected to
+-        # exist.
+-        if exists:
+-            # Raise error if (i) the directory does not exists, or (ii) exists
+-            # but does not contain the descriptor file.
+-            if not os.path.isdir(basedir):
+-                raise ValueError('archive manager does not exist')
+-            elif os.listdir(basedir) and not exists_descriptorfile:
+-                raise ValueError('archive manager does not exist')
+-        self.basedir = util.createdir(basedir)
++        if create:
++            # Clear all files in the base directory if it exists.
++            if os.path.isdir(self.basedir):
++                util.cleardir(self.basedir)
++        util.createdir(self.basedir)
+         # Initialize the internal cache of archive descriptors
++        self.descriptorfile = os.path.join(basedir, 'archives.json')
+         self._archives = dict()
+-        if exists_descriptorfile:
++        if os.path.isfile(self.descriptorfile):
+             with open(self.descriptorfile, 'r') as f:
+                 doc = json.load(f)
+             for obj in doc:
+                 descriptor = ArchiveDescriptor(obj)
+                 self._archives[descriptor.identifier()] = descriptor
+ 
+-    def archives(self):
++    def archives(self) -> Dict[str, ArchiveDescriptor]:
+         """Get dictionary of archive descriptors. The returned dictionary maps
+         archive identifier to their descriptor.
+ 
+@@ -74,9 +73,10 @@ def archives(self):
+         return self._archives
+ 
+     def create(
+-        self, name=None, description=None, primary_key=None, encoder=None,
+-        decoder=None
+-    ):
++        self, name: Optional[str] = None, description: Optional[str] = None,
++        primary_key: Optional[Union[List[str], str]] = None,
++        encoder: Optional[str] = None, decoder: Optional[str] = None
++    ) -> ArchiveDescriptor:
+         """Create a new archive object. Raises a ValueError if an archive with
+         the given name exists.
+ 
+@@ -121,7 +121,7 @@ def create(
+         self.write()
+         return descriptor
+ 
+-    def delete(self, identifier):
++    def delete(self, identifier: str):
+         """Delete the archive with the given identifier.
+ 
+         Parameters
+@@ -136,7 +136,7 @@ def delete(self, identifier):
+             del self._archives[identifier]
+             self.write()
+ 
+-    def get(self, identifier):
++    def get(self, identifier: str) -> PersistentArchive:
+         """Get the archive that is associated with the given identifier. Raises
+         a ValueError if the identifier is unknown.
+ 
+@@ -176,7 +176,7 @@ def get(self, identifier):
+             decoder=decoder
+         )
+ 
+-    def rename(self, identifier, name):
++    def rename(self, identifier: str, name: str):
+         """Rename the specified archive. Raises a ValueError if the identifier
+         is unknown or if an archive with the given name exist.
+ 
+diff --git a/histore/archive/manager/mem.py b/histore/archive/manager/mem.py
+index 84b788f..16f7f0e 100644
+--- a/histore/archive/manager/mem.py
++++ b/histore/archive/manager/mem.py
+@@ -7,6 +7,8 @@
+ 
+ """Manager implementation for archives that are maintained in main memory."""
+ 
++from typing import Dict, List, Optional, Union
++
+ from histore.archive.base import Archive
+ from histore.archive.manager.base import ArchiveManager
+ from histore.archive.manager.descriptor import ArchiveDescriptor
+@@ -22,7 +24,7 @@ def __init__(self):
+         self._archives = dict()
+         self._descriptors = dict()
+ 
+-    def archives(self):
++    def archives(self) -> Dict[str, ArchiveDescriptor]:
+         """Get dictionary of archive descriptors. The returned dictionary maps
+         archive identifier to their descriptor.
+ 
+@@ -33,9 +35,10 @@ def archives(self):
+         return self._descriptors
+ 
+     def create(
+-        self, name=None, description=None, primary_key=None, encoder=None,
+-        decoder=None
+-    ):
++        self, name: Optional[str] = None, description: Optional[str] = None,
++        primary_key: Optional[Union[List[str], str]] = None,
++        encoder: Optional[str] = None, decoder: Optional[str] = None
++    ) -> ArchiveDescriptor:
+         """Create a new volatile archive object. Raises a ValueError if an
+         archive with the given name exists.
+ 
+@@ -78,7 +81,7 @@ def create(
+         self._descriptors[identifier] = descriptor
+         return descriptor
+ 
+-    def delete(self, identifier):
++    def delete(self, identifier: str):
+         """Delete the archive with the given identifier.
+ 
+         Parameters
+@@ -90,7 +93,7 @@ def delete(self, identifier):
+             del self._archives[identifier]
+             del self._descriptors[identifier]
+ 
+-    def get(self, identifier):
++    def get(self, identifier: str) -> Archive:
+         """Get the archive that is associated with the given identifier. Raises
+         a ValueError if the identifier is unknown.
+ 
+@@ -111,7 +114,7 @@ def get(self, identifier):
+             raise ValueError("unknown archive '{}''".format(identifier))
+         return self._archives[identifier]
+ 
+-    def rename(self, identifier, name):
++    def rename(self, identifier: str, name: str):
+         """Rename the specified archive. Raises a ValueError if the identifier
+         is unknown or if an archive with the given name exist.
+ 
+diff --git a/histore/archive/manager/persist.py b/histore/archive/manager/persist.py
+new file mode 100644
+index 0000000..a9f0ad4
+--- /dev/null
++++ b/histore/archive/manager/persist.py
+@@ -0,0 +1,50 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
++
++"""Factory pattern for persistent archive managers."""
++
++from typing import Optional
++
++from histore.archive.manager.base import ArchiveManager
++from histore.archive.manager.db.base import DBArchiveManager
++from histore.archive.manager.db.database import DB
++from histore.archive.manager.fs import FileSystemArchiveManager
++
++
++class PersistentArchiveManager(ArchiveManager):
++    """Create an instance of a persistent archive manager. There currenty are
++    two implementations for persistent archive manager: (i) the file-system
++    archive manager, and (ii) the archive manager that maintains archive
++    descriptors in a relational databaase.
++    """
++    def __new__(
++        cls, basedir: Optional[str] = None, dbconnect: Optional[str] = None,
++        create: Optional[bool] = False
++    ):
++        """Create an instance of a persistent archive manager. If the database
++        connector string is given an instance of the DBArchiveManager is
++        returned. Otherwise, an instance of the FileSystemArchiveManager is
++        returned
++
++        Parameters
++        ----------
++        basedir: string, default=None
++            Path to dorectory on disk where archives are maintained.
++        db: histore.archive.manager.db.database.DB, default=None
++            Database connection object.
++        create: bool, default=False
++            Create a fresh database and delete all files in the base directory
++            if True.
++        """
++        if dbconnect is not None:
++            return DBArchiveManager(
++                basedir=basedir,
++                db=DB(connect_url=dbconnect),
++                create=create
++            )
++        else:
++            return FileSystemArchiveManager(basedir=basedir, create=create)
+diff --git a/histore/archive/snapshot.py b/histore/archive/snapshot.py
+index 8b584b5..424fc20 100644
+--- a/histore/archive/snapshot.py
++++ b/histore/archive/snapshot.py
+@@ -7,6 +7,9 @@
+ 
+ """Classes to maintain information about dataset snapshots in an archive."""
+ 
++from datetime import datetime
++from typing import List, Optional
++
+ import histore.util as util
+ 
+ 
+@@ -15,7 +18,9 @@ class Snapshot(object):
+     single snapshot in a dataset archive.
+     """
+     def __init__(
+-        self, version, valid_time, transaction_time=None, description=None
++        self, version: int, valid_time: datetime,
++        transaction_time: Optional[datetime] = None,
++        description: Optional[str] = None
+     ):
+         """Initialize the snapshot meta-data.
+ 
+@@ -54,7 +59,7 @@ def __repr__(self):
+         )
+ 
+     @property
+-    def created_at(self):
++    def created_at(self) -> datetime:
+         """Shortcut for transaction timestamp.
+ 
+         Returns
+@@ -69,14 +74,14 @@ class SnapshotListing(object):
+     that the order of snapshots reflects the order of their version numbers
+     and valid times.
+     """
+-    def __init__(self, snapshots=None):
++    def __init__(self, snapshots: Optional[List[Snapshot]] = None):
+         """Initialize the list of snapshot descriptors. Raises a ValueError if
+         the order of snapshots in the list does not reflect the order of their
+         version numbers and valid times.
+ 
+         Parameters
+         ----------
+-        snapshots: histore.archive.snapshot.Snapshot, default=None
++        snapshots: list of histore.archive.snapshot.Snapshot, default=None
+             List of snapshots descriptors for snapshots in an archive.
+ 
+         Raises
+@@ -115,19 +120,25 @@ def __len__(self):
+         """
+         return len(self.snapshots)
+ 
+-    def append(self, valid_time=None, description=None):
++    def append(
++        self, version: int, valid_time: Optional[datetime] = None,
++        description: Optional[str] = None
++    ):
+         """Add a new version to the given listing. This will return a modified
+         version listing with the new snapshot as the last element.
+ 
+-        The snapshot version will be one greater that the last version. If the
+-        snapshot list is empty the first version will be zero. If the valid
+-        time is not given the transaction time is used as valid time.
++        Ensures that the version identifier matches the value that is returned
++        by the next_version method. If this is not the case a ValueError will
++        be raised. If the valid time is not given the transaction time is used
++        as valid time.
+ 
+         Raises a valueError if the new snapshot violates the order of valid
+         times in the list.
+ 
+         Parameters
+         ----------
++        version: int
++            Unique version identifier for the new snapshot.
+         valid_time: datetime.datetime, default=None
+             Timestamp when the snapshot was first valid. A snapshot is valid
+             until the valid time of the next snapshot in the archive.
+@@ -142,10 +153,8 @@ def append(self, valid_time=None, description=None):
+         ------
+         ValueError
+         """
+-        if not self.snapshots:
+-            version = 0
+-        else:
+-            version = self.snapshots[-1].version + 1
++        if version != self.next_version():
++            raise ValueError("invalid version '{}'".format(version))
+         transaction_time = util.utc_now()
+         valid_time = valid_time if valid_time is not None else transaction_time
+         s = Snapshot(
+@@ -156,7 +165,7 @@ def append(self, valid_time=None, description=None):
+         )
+         return SnapshotListing(snapshots=self.snapshots + [s])
+ 
+-    def at_time(self, ts):
++    def at_time(self, ts: datetime) -> Snapshot:
+         """Get the snapshot that was valid at the given time. A snapshot is
+         considered valid starting at its valit_time until the next timestamp.
+         The last snapshot in the list is considered valid until infinity.
+@@ -192,7 +201,7 @@ def at_time(self, ts):
+         # The last snapshot was valid at or before the given timestamp.
+         return s1
+ 
+-    def has_version(self, version):
++    def has_version(self, version: int) -> bool:
+         """Check if the given version identifier references an existing
+         snapshot in the listing.
+ 
+@@ -210,7 +219,7 @@ def has_version(self, version):
+                 return True
+         return False
+ 
+-    def is_empty(self):
++    def is_empty(self) -> bool:
+         """Shortcut to test if the list of snapshots is empty.
+ 
+         Returns
+@@ -219,7 +228,7 @@ def is_empty(self):
+         """
+         return not self.snapshots
+ 
+-    def last_snapshot(self):
++    def last_snapshot(self) -> Snapshot:
+         """Shortcut to get the last snapshot in the list. The result is None if
+         the listing is empty.
+ 
+@@ -230,3 +239,16 @@ def last_snapshot(self):
+         if not self.snapshots:
+             return None
+         return self.snapshots[-1]
++
++    def next_version(self) -> int:
++        """Get the unique version identifier for the next archive version. This
++        operation should not change the internal state. It is assumed that the
++        version is used to merge a new archive snapshot. A new snapshot with
++        the returned version identifier will be commited (via the append
++        method) only if the merge is successful.
++
++        Returns
++        -------
++        int
++        """
++        return 0 if not self.snapshots else self.snapshots[-1].version + 1
+diff --git a/histore/archive/store/base.py b/histore/archive/store/base.py
+index db6b2db..369d524 100644
+--- a/histore/archive/store/base.py
++++ b/histore/archive/store/base.py
+@@ -10,6 +10,13 @@
+ """
+ 
+ from abc import ABCMeta, abstractmethod
++from datetime import datetime
++from typing import Optional
++
++from histore.archive.reader import ArchiveReader
++from histore.archive.schema import ArchiveSchema
++from histore.archive.snapshot import Snapshot, SnapshotListing
++from histore.archive.writer import ArchiveWriter
+ 
+ 
+ class ArchiveStore(metaclass=ABCMeta):
+@@ -17,10 +24,16 @@ class ArchiveStore(metaclass=ABCMeta):
+     archive information.
+     """
+     @abstractmethod
+-    def commit(self, schema, writer, snapshots):  # pragma: no cover
++    def commit(
++        self, schema: ArchiveSchema, writer: ArchiveWriter, version: int,
++        valid_time: Optional[datetime] = None,
++        description: Optional[str] = None
++    ) -> Snapshot:  # pragma: no cover
+         """Commit a new version of the dataset archive. The modified components
+         of the archive are given as the three arguments of this method.
+ 
++        Returns the handle for the newly created snapshot.
++
+         Parameters
+         ----------
+         schema: histore.archive.schema.ArchiveSchema
+@@ -28,14 +41,22 @@ def commit(self, schema, writer, snapshots):  # pragma: no cover
+         writer: histore.archive.writer.ArchiveWriter
+             Instance of the archive writer class returned by this store that
+             was used to output the rows of the new archive version.
+-        snapshots: histore.archive.snapshot.SnapshotListing
+-            Modified list of snapshots in the new archive. The new archive
+-            version is the last entry in the list.
++        version: int
++            Unique version identifier for the new snapshot.
++        valid_time: datetime.datetime, default=None
++            Timestamp when the snapshot was first valid. A snapshot is valid
++            until the valid time of the next snapshot in the archive.
++        description: string, default=None
++            Optional user-provided description for the snapshot.
++
++        Returns
++        -------
++        histore.archive.snapshot.Snapshot
+         """
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def is_empty(self):  # pragma: no cover
++    def is_empty(self) -> bool:  # pragma: no cover
+         """True if the archive does not contain any snapshots yet.
+ 
+         Returns
+@@ -45,7 +66,7 @@ def is_empty(self):  # pragma: no cover
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def get_reader(self):  # pragma: no cover
++    def get_reader(self) -> ArchiveReader:  # pragma: no cover
+         """Get the row reader for this archive.
+ 
+         Returns
+@@ -55,7 +76,7 @@ def get_reader(self):  # pragma: no cover
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def get_schema(self):  # pragma: no cover
++    def get_schema(self) -> ArchiveSchema:  # pragma: no cover
+         """Get the schema history for the archived dataset.
+ 
+         Returns
+@@ -65,7 +86,7 @@ def get_schema(self):  # pragma: no cover
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def get_snapshots(self):  # pragma: no cover
++    def get_snapshots(self) -> SnapshotListing:  # pragma: no cover
+         """Get listing of all snapshots in the archive.
+ 
+         Returns
+@@ -75,7 +96,7 @@ def get_snapshots(self):  # pragma: no cover
+         raise NotImplementedError()
+ 
+     @abstractmethod
+-    def get_writer(self):  # pragma: no cover
++    def get_writer(self) -> ArchiveWriter:  # pragma: no cover
+         """Get a writer for a new version of the archive.
+ 
+         Returns
+diff --git a/histore/archive/store/fs/base.py b/histore/archive/store/fs/base.py
+index cb81168..c099453 100644
+--- a/histore/archive/store/fs/base.py
++++ b/histore/archive/store/fs/base.py
+@@ -18,6 +18,9 @@
+ import os
+ import shutil
+ 
++from datetime import datetime
++from typing import Optional
++
+ from histore.archive.schema import ArchiveSchema
+ from histore.archive.serialize.default import DefaultSerializer
+ from histore.archive.snapshot import SnapshotListing
+@@ -101,10 +104,16 @@ def __init__(
+                 if os.path.isfile(f):
+                     os.remove(f)
+ 
+-    def commit(self, schema, writer, snapshots):
++    def commit(
++        self, schema: ArchiveSchema, writer: ArchiveFileWriter, version: int,
++        valid_time: Optional[datetime] = None,
++        description: Optional[str] = None
++    ):
+         """Commit a new version of the dataset archive. The modified components
+         of the archive are given as the three arguments of this method.
+ 
++        Returns the handle for the newly created snapshot.
++
+         Parameters
+         ----------
+         schema: histore.archive.schema.ArchiveSchema
+@@ -112,10 +121,24 @@ def commit(self, schema, writer, snapshots):
+         writer: histore.archive.writer.ArchiveWriter
+             Instance of the archive writer class returned by this store that
+             was used to output the rows of the new archive version.
+-        snapshots: histore.archive.snapshot.SnapshotListing
+-            Modified list of snapshots in the new archive. The new archive
+-            version is the last entry in the list.
++        version: int
++            Unique version identifier for the new snapshot.
++        valid_time: datetime.datetime, default=None
++            Timestamp when the snapshot was first valid. A snapshot is valid
++            until the valid time of the next snapshot in the archive.
++        description: string, default=None
++            Optional user-provided description for the snapshot.
++
++        Returns
++        -------
++        histore.archive.snapshot.Snapshot
+         """
++        # Get an updated shapshot listing.
++        snapshots = self.snapshots.append(
++            version=version,
++            valid_time=valid_time,
++            description=description
++        )
+         # Write temporary metadata file to disk (to ensure that write does not
+         # raise an error).
+         encoder = self.serializer
+@@ -138,8 +161,10 @@ def commit(self, schema, writer, snapshots):
+         self.schema = schema
+         self.snapshots = snapshots
+         self.row_counter = writer.row_counter
++        # Return handle for the new snapshot.
++        return snapshots.last_snapshot()
+ 
+-    def is_empty(self):
++    def is_empty(self) -> bool:
+         """True if the archive does not contain any snapshots yet.
+ 
+         Returns
+@@ -148,7 +173,7 @@ def is_empty(self):
+         """
+         return self.snapshots.is_empty()
+ 
+-    def get_reader(self):
++    def get_reader(self) -> ArchiveFileReader:
+         """Get the row reader for this archive.
+ 
+         Returns
+@@ -162,7 +187,7 @@ def get_reader(self):
+             decoder=self.decoder
+         )
+ 
+-    def get_schema(self):
++    def get_schema(self) -> ArchiveSchema:
+         """Get the schema history for the archived dataset.
+ 
+         Returns
+@@ -171,7 +196,7 @@ def get_schema(self):
+         """
+         return self.schema
+ 
+-    def get_snapshots(self):
++    def get_snapshots(self) -> SnapshotListing:
+         """Get listing of all snapshots in the archive.
+ 
+         Returns
+@@ -180,7 +205,7 @@ def get_snapshots(self):
+         """
+         return self.snapshots
+ 
+-    def get_writer(self):
++    def get_writer(self) -> ArchiveFileWriter:
+         """Get a a new archive buffer to maintain rows for a new archive
+         version.
+ 
+diff --git a/histore/archive/store/mem/base.py b/histore/archive/store/mem/base.py
+index 418bdb5..f85db53 100644
+--- a/histore/archive/store/mem/base.py
++++ b/histore/archive/store/mem/base.py
+@@ -9,6 +9,9 @@
+ memory. Archive information is not persisted.
+ """
+ 
++from datetime import datetime
++from typing import Optional
++
+ from histore.archive.schema import ArchiveSchema
+ from histore.archive.snapshot import SnapshotListing
+ from histore.archive.store.base import ArchiveStore
+@@ -27,10 +30,16 @@ def __init__(self):
+         self.snapshots = SnapshotListing()
+         self.row_counter = 0
+ 
+-    def commit(self, schema, writer, snapshots):
++    def commit(
++        self, schema: ArchiveSchema, writer: ArchiveBuffer, version: int,
++        valid_time: Optional[datetime] = None,
++        description: Optional[str] = None
++    ):
+         """Commit a new version of the dataset archive. The modified components
+         of the archive are given as the three arguments of this method.
+ 
++        Returns the handle for the newly created snapshot.
++
+         Parameters
+         ----------
+         schema: histore.archive.schema.ArchiveSchema
+@@ -38,14 +47,30 @@ def commit(self, schema, writer, snapshots):
+         writer: histore.archive.writer.ArchiveWriter
+             Instance of the archive writer class returned by this store that
+             was used to output the rows of the new archive version.
+-        snapshots: histore.archive.snapshot.SnapshotListing
+-            Modified list of snapshots in the new archive. The new archive
+-            version is the last entry in the list.
++        version: int
++            Unique version identifier for the new snapshot.
++        valid_time: datetime.datetime, default=None
++            Timestamp when the snapshot was first valid. A snapshot is valid
++            until the valid time of the next snapshot in the archive.
++        description: string, default=None
++            Optional user-provided description for the snapshot.
++
++        Returns
++        -------
++        histore.archive.snapshot.Snapshot
+         """
++        # Get an updated shapshot listing.
++        snapshots = self.snapshots.append(
++            version=version,
++            valid_time=valid_time,
++            description=description
++        )
+         self.rows = writer.rows
+         self.schema = schema
+         self.snapshots = snapshots
+         self.row_counter = writer.row_counter
++        # Return handle for the new snapshot.
++        return snapshots.last_snapshot()
+ 
+     def is_empty(self):
+         """True if the archive does not contain any snapshots yet.
+@@ -56,7 +81,7 @@ def is_empty(self):
+         """
+         return self.snapshots.is_empty()
+ 
+-    def get_reader(self):
++    def get_reader(self) -> BufferedReader:
+         """Get the row reader for this archive.
+ 
+         Returns
+@@ -65,7 +90,7 @@ def get_reader(self):
+         """
+         return BufferedReader(rows=self.rows)
+ 
+-    def get_schema(self):
++    def get_schema(self) -> ArchiveSchema:
+         """Get the schema history for the archived dataset.
+ 
+         Returns
+@@ -74,7 +99,7 @@ def get_schema(self):
+         """
+         return self.schema
+ 
+-    def get_snapshots(self):
++    def get_snapshots(self) -> SnapshotListing:
+         """Get listing of all snapshots in the archive.
+ 
+         Returns
+@@ -83,7 +108,7 @@ def get_snapshots(self):
+         """
+         return self.snapshots
+ 
+-    def get_writer(self):
++    def get_writer(self) -> ArchiveBuffer:
+         """Get a a new archive buffer to maintain rows for a new archive
+         version.
+ 
+diff --git a/histore/cli/archive.py b/histore/cli/archive.py
+index 4b8706c..956de8b 100644
+--- a/histore/cli/archive.py
++++ b/histore/cli/archive.py
+@@ -12,7 +12,10 @@
+ import click
+ import sys
+ 
+-from histore.archive.manager.fs import PersistentArchiveManager
++from typing import Optional
++
++from histore import PersistentArchiveManager
++from histore.archive.manager.base import ArchiveManager
+ 
+ import histore.config as config
+ import histore.util as util
+@@ -31,6 +34,11 @@
+     type=click.Path(file_okay=False, dir_okay=True),
+     help='Base directory for archive files'
+ )
++@click.option(
++    '-c', '--dbconnect',
++    required=False,
++    help='Connect URL for the database'
++)
+ @click.option(
+     '-k', '--pk',
+     required=False,
+@@ -38,7 +46,7 @@
+     help='Comma-separate list of primary key columns'
+ )
+ @click.option(
+-    '-c', '--comment',
++    '-t', '--comment',
+     required=False,
+     type=str,
+     help='Optional archive description'
+@@ -56,9 +64,9 @@
+     help='JSON decoder function for the new archive'
+ )
+ @click.argument('name')
+-def create_archive(basedir, pk, comment, encoder, decoder, name):
++def create_archive(basedir, dbconnect, pk, comment, encoder, decoder, name):
+     """Create a new archive."""
+-    manager = get_manager(basedir)
++    manager = get_manager(basedir, dbconnect=dbconnect)
+     # Split primary key if it contains ','.
+     primary_key = pk.split(',') if pk is not None else None
+     try:
+@@ -84,6 +92,11 @@ def create_archive(basedir, pk, comment, encoder, decoder, name):
+     type=click.Path(file_okay=False, dir_okay=True),
+     help='Base directory for archive files'
+ )
++@click.option(
++    '-c', '--dbconnect',
++    required=False,
++    help='Connect URL for the database'
++)
+ @click.option(
+     '-f', '--force',
+     is_flag=True,
+@@ -91,9 +104,9 @@ def create_archive(basedir, pk, comment, encoder, decoder, name):
+     help='Delete without confirmation'
+ )
+ @click.argument('name')
+-def delete_archive(basedir, force, name):
++def delete_archive(basedir, dbconnect, force, name):
+     """Delete existing archive."""
+-    manager = get_manager(basedir)
++    manager = get_manager(basedir, dbconnect=dbconnect)
+     for archive in manager.list():
+         if archive.name() == name:
+             if not force:
+@@ -116,15 +129,20 @@ def delete_archive(basedir, force, name):
+     type=click.Path(file_okay=False, dir_okay=True),
+     help='Base directory for archive files'
+ )
++@click.option(
++    '-c', '--dbconnect',
++    required=False,
++    help='Connect URL for the database'
++)
+ @click.option(
+     '-d', '--bydate',
+     is_flag=True,
+     default=False,
+     help='Sort by creation date'
+ )
+-def list_archives(basedir, bydate):
++def list_archives(basedir, dbconnect, bydate):
+     """List names of existing archives."""
+-    manager = get_manager(basedir)
++    manager = get_manager(basedir, dbconnect=dbconnect)
+     archives = manager.list()
+     if bydate:
+         archives = sorted(archives, key=lambda a: a.created_at())
+@@ -151,11 +169,16 @@ def list_archives(basedir, bydate):
+     type=click.Path(file_okay=False, dir_okay=True),
+     help='Base directory for archive files'
+ )
++@click.option(
++    '-c', '--dbconnect',
++    required=False,
++    help='Connect URL for the database'
++)
+ @click.argument('oldname')
+ @click.argument('newname')
+-def rename_archive(basedir, oldname, newname):
++def rename_archive(basedir, dbconnect, oldname, newname):
+     """Rename existing archive."""
+-    manager = get_manager(basedir)
++    manager = get_manager(basedir, dbconnect=dbconnect)
+     # Get archive with the old name
+     archive = manager.get_by_name(oldname)
+     if archive is None:
+@@ -170,7 +193,9 @@ def rename_archive(basedir, oldname, newname):
+ 
+ # -- Helper Functions ---------------------------------------------------------
+ 
+-def get_manager(basedir):
++def get_manager(
++    basedir: str, dbconnect: Optional[str] = None
++) -> ArchiveManager:
+     """Create instance of persistent archive manager assuming that it has been
+     initialized before.
+ 
+@@ -178,10 +203,16 @@ def get_manager(basedir):
+     ----------
+     basedir: string
+         Base directory for the archive manager.
++    dbconnect: string, default=None
++        Database connect string.
+ 
+     Returns
+     -------
+-    histore.archive.manager.fs.PersistentArchiveManager
++    histore.archive.manager.base.ArchiveManager
+     """
+     basedir = basedir if basedir is not None else config.BASEDIR()
+-    return PersistentArchiveManager(basedir=basedir, exists=True)
++    return PersistentArchiveManager(
++        basedir=basedir,
++        dbconnect=dbconnect,
++        create=False
++    )
+diff --git a/histore/cli/base.py b/histore/cli/base.py
+index 72a81af..fccb969 100644
+--- a/histore/cli/base.py
++++ b/histore/cli/base.py
+@@ -13,7 +13,7 @@
+ import os
+ import sys
+ 
+-from histore.archive.manager.fs import PersistentArchiveManager
++from histore import PersistentArchiveManager
+ from histore.cli.archive import (
+     create_archive, delete_archive, list_archives, rename_archive
+ )
+@@ -33,7 +33,12 @@
+     type=click.Path(file_okay=False, dir_okay=True),
+     help='Base directory for archive files'
+ )
+-def init_manager(basedir):
++@click.option(
++    '-c', '--dbconnect',
++    required=False,
++    help='Connect URL for the database'
++)
++def init_manager(basedir, dbconnect):
+     """Initialize the archive manager directory."""
+     # Test if the base directory exists and is empty.
+     basedir = basedir if basedir is not None else config.BASEDIR()
+@@ -43,7 +48,11 @@ def init_manager(basedir):
+             sys.exit(-1)
+     # Create instance of persistent archive manager to setup directories and
+     # files.
+-    PersistentArchiveManager(basedir=basedir, exists=False)
++    PersistentArchiveManager(
++        basedir=basedir,
++        dbconnect=dbconnect,
++        create=True
++    )
+     click.echo("Initialized in {}.".format(os.path.abspath(basedir)))
+ 
+ 
+diff --git a/histore/config.py b/histore/config.py
+index def9606..d6081d6 100644
+--- a/histore/config.py
++++ b/histore/config.py
+@@ -17,11 +17,13 @@
+ """Environment variables."""
+ # Base directory for all files that are created by histore components.
+ ENV_HISTORE_BASEDIR = 'HISTORE_BASEDIR'
++# Database connection URL for archive manager.
++ENV_HISTORE_DBCONNECT = 'HISTORE_DBCONNECT'
+ # Size of the sort buffer for CSV files that are sorted using external memory.
+ ENV_HISTORE_SORTBUFFER = 'HISTORE_SORTBUFFER'
+ 
+ 
+-def BASEDIR():
++def BASEDIR() -> str:
+     """Get value for environment variable HISTORE_BASEDIR. The default value
+     if the variable is not set is $HOME/.histore.
+ 
+@@ -36,7 +38,18 @@ def BASEDIR():
+     return value
+ 
+ 
+-def SORTBUFFER():
++def DBCONNECT() -> str:
++    """Get value for environment variable HISTORE_DBCONNECT. The default value
++    for the database connector is not defined (None).
++
++    Returns
++    -------
++    string
++    """
++    return os.environ.get(ENV_HISTORE_DBCONNECT)
++
++
++def SORTBUFFER() -> float:
+     """Get value for environment variable HISTORE_SORTBUFFER. The default value
+     if the variable is not set is 50% of the available main-memory.
+ 
+diff --git a/histore/util.py b/histore/util.py
+index d381611..2b11b04 100644
+--- a/histore/util.py
++++ b/histore/util.py
+@@ -16,11 +16,22 @@
+ import errno
+ import gzip
+ import os
++import shutil
+ import uuid
+ 
+ 
+ # -- Datetime -----------------------------------------------------------------
+ 
++def current_time() -> str:
++    """Get ISO format string for the current time.
++
++    Returns
++    -------
++    str
++    """
++    return utc_now().isoformat()
++
++
+ def to_datetime(timestamp):
+     """Converts a timestamp string in ISO format into a datatime object in
+     UTC timezone.
+@@ -93,6 +104,22 @@ def import_obj(import_path):
+ 
+ # -- I/O ----------------------------------------------------------------------
+ 
++def cleardir(directory):
++    """Remove all files in the given directory.
++
++    Parameters
++    ----------
++    directory: string
++        Path to directory that is being created.
++    """
++    for filename in os.listdir(directory):
++        file = os.path.join(directory, filename)
++        if os.path.isfile(file) or os.path.islink(file):
++            os.unlink(file)
++        elif os.path.isdir(file):
++            shutil.rmtree(file)
++
++
+ def createdir(directory, abs=False):
+     """Safely create the given directory path if it does not exist.
+ 
+diff --git a/histore/version.py b/histore/version.py
+index f969437..d6049c3 100644
+--- a/histore/version.py
++++ b/histore/version.py
+@@ -6,4 +6,4 @@
+ # file LICENSE for full license details.
+ 
+ """Code version information for histore."""
+-__version__ = '0.1.2'
++__version__ = '0.1.3'
+diff --git a/requirements.txt b/requirements.txt
+index 9cf0ea3..6208db6 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -3,4 +3,5 @@ jsonschema>=3.2.0
+ python-dateutil
+ pyyaml
+ psutil
++SQLAlchemy>=1.3.18
+ Click>=7.0
+diff --git a/setup.py b/setup.py
+index 182bb24..04fb857 100644
+--- a/setup.py
++++ b/setup.py
+@@ -19,6 +19,7 @@
+     'python-dateutil',
+     'pyyaml',
+     'psutil',
++    'SQLAlchemy>=1.3.18',
+     'Click>=7.0'
+ ]
+ 
+diff --git a/tests/archive/manager/test_persistent_manager.py b/tests/archive/manager/test_persistent_manager.py
+index 33c0210..3a53513 100644
+--- a/tests/archive/manager/test_persistent_manager.py
++++ b/tests/archive/manager/test_persistent_manager.py
+@@ -13,15 +13,30 @@
+ 
+ from datetime import datetime
+ 
+-from histore.archive.manager.fs import PersistentArchiveManager
++from histore.archive.manager.db.base import DBArchiveManager
++from histore.archive.manager.db.database import DB, TEST_URL
++from histore.archive.manager.fs import FileSystemArchiveManager
++from histore.archive.manager.persist import PersistentArchiveManager
+ 
+ import histore.config as config
+ 
+ 
+-def test_persistent_archive_manager(tmpdir):
++@pytest.mark.parametrize(
++    'ManagerCls,kwargs',
++    [
++        (FileSystemArchiveManager, dict()),
++        (DBArchiveManager, dict({'db': DB(connect_url=TEST_URL)}))
++    ]
++)
++def test_create_archive(ManagerCls, kwargs, tmpdir):
+     """Test functionality of the persistent archive manager."""
+-    manager = PersistentArchiveManager(basedir=str(tmpdir))
++    # -- Setup ----------------------------------------------------------------
++    kwargs['basedir'] = str(tmpdir)
++    kwargs['create'] = True
++    # -- Create empty manager instance ----------------------------------------
++    manager = ManagerCls(**kwargs)
+     assert len(manager.archives()) == 0
++    # -- Ad first archive -----------------------------------------------------
+     descriptor = manager.create(
+         name='First archive',
+         description='My first archive',
+@@ -41,9 +56,9 @@ def test_persistent_archive_manager(tmpdir):
+     assert archive is not None
+     with pytest.raises(ValueError):
+         manager.get('unknown')
+-    # Reload the archive manager.
+-    os.environ[config.ENV_HISTORE_BASEDIR] = str(tmpdir)
+-    manager = PersistentArchiveManager(exists=True)
++    # -- Reload the archive manager -------------------------------------------
++    kwargs['create'] = False
++    manager = ManagerCls(**kwargs)
+     assert len(manager.archives()) == 1
+     archive = manager.get(descriptor.identifier())
+     assert archive is not None
+@@ -54,20 +69,22 @@ def test_persistent_archive_manager(tmpdir):
+     # Error cases
+     with pytest.raises(ValueError):
+         manager.get(descriptor.identifier())
+-    # Cleanup the environment
+-    del os.environ[config.ENV_HISTORE_BASEDIR]
+-    # Error case when using the exist flag.
+-    with pytest.raises(ValueError):
+-        PersistentArchiveManager(
+-            basedir=os.path.join(str(tmpdir), 'ABC'),
+-            exists=True
+-        )
+ 
+ 
+-def test_default_json_encoder(tmpdir):
++@pytest.mark.parametrize(
++    'ManagerCls,kwargs',
++    [
++        (FileSystemArchiveManager, dict()),
++        (DBArchiveManager, dict({'db': DB(connect_url=TEST_URL)}))
++    ]
++)
++def test_encoder_default(ManagerCls, kwargs, tmpdir):
+     """Test persistent archives with default Json encoder."""
+-    # Use the default encoder and decoder.
+-    manager = PersistentArchiveManager(basedir=str(tmpdir))
++    # -- Setup ----------------------------------------------------------------
++    kwargs['basedir'] = str(tmpdir)
++    kwargs['create'] = True
++    # -- Use the default encoder and decoder ----------------------------------
++    manager = ManagerCls(**kwargs)
+     descriptor = manager.create(name='Archive')
+     archive = manager.get(descriptor.identifier())
+     dt = datetime.now()
+@@ -78,16 +95,27 @@ def test_default_json_encoder(tmpdir):
+     assert isinstance(df.iloc[0][0], datetime)
+ 
+ 
+-def test_custom_json_encoder(tmpdir):
++@pytest.mark.parametrize(
++    'ManagerCls,kwargs',
++    [
++        (FileSystemArchiveManager, dict()),
++        (DBArchiveManager, dict({'db': DB(connect_url=TEST_URL)}))
++    ]
++)
++def test_encoder_custom(ManagerCls, kwargs, tmpdir):
+     """Test persistent archives with custom Json encoder."""
++    # -- Setup ----------------------------------------------------------------
++    kwargs['basedir'] = str(tmpdir)
++    kwargs['create'] = True
+     # Use the default encoder and decoder.
+-    manager = PersistentArchiveManager(basedir=str(tmpdir))
++    manager = ManagerCls(**kwargs)
+     descriptor = manager.create(
+         name='Archive',
+         encoder='histore.tests.encode.TestEncoder',
+         decoder='histore.tests.encode.test_decoder'
+     )
+-    manager = PersistentArchiveManager(basedir=str(tmpdir))
++    kwargs['create'] = False
++    manager = ManagerCls(**kwargs)
+     archive = manager.get(descriptor.identifier())
+     dt = datetime.now()
+     archive.commit(pd.DataFrame(data=[[dt, 'A']]))
+@@ -95,3 +123,55 @@ def test_custom_json_encoder(tmpdir):
+     assert df.shape == (1, 2)
+     assert df.iloc[0][0] == dt.isoformat()
+     assert isinstance(df.iloc[0][0], str)
++
++
++def test_manager_factory(tmpdir):
++    """Test creating persistent archive manager using the manager factory."""
++    # -- Setup ----------------------------------------------------------------
++    os.environ[config.ENV_HISTORE_BASEDIR] = str(tmpdir)
++    # -- Get file system manager if no connect URL is given -------------------
++    manager = PersistentArchiveManager()
++    assert isinstance(manager, FileSystemArchiveManager)
++    # -- Get database manager if connect URL is given -------------------------
++    manager = PersistentArchiveManager(dbconnect=TEST_URL)
++    assert isinstance(manager, DBArchiveManager)
++    # -- Cleanup --------------------------------------------------------------
++    del os.environ[config.ENV_HISTORE_BASEDIR]
++
++
++@pytest.mark.parametrize(
++    'ManagerCls,kwargs',
++    [
++        (FileSystemArchiveManager, dict()),
++        (DBArchiveManager, dict({'db': DB(connect_url=TEST_URL)}))
++    ]
++)
++def test_rename_archive(ManagerCls, kwargs, tmpdir):
++    """Test functionality of the persistent archive manager."""
++    # -- Setup ----------------------------------------------------------------
++    kwargs['basedir'] = str(tmpdir)
++    kwargs['create'] = True
++    # -- Create empty manager instance ----------------------------------------
++    manager = ManagerCls(**kwargs)
++    assert len(manager.archives()) == 0
++    # -- Create two archives archive ------------------------------------------
++    arch_1 = manager.create(
++        name='First archive',
++        description='My first archive',
++        primary_key='SSN'
++    )
++    arch_2 = manager.create(name='Second archive', description='Another one')
++    # -- Reload the archive manager -------------------------------------------
++    kwargs['create'] = False
++    manager = ManagerCls(**kwargs)
++    manager.rename(identifier=arch_2.identifier(), name='My archive')
++    assert manager.get_by_name('First archive') is not None
++    assert manager.get_by_name('My archive') is not None
++    assert manager.get_by_name('Second archive') is None
++    manager.rename(identifier=arch_2.identifier(), name='My archive')
++    # -- Error when renaming a non-exitent archive ----------------------------
++    with pytest.raises(ValueError):
++        manager.rename(identifier='unknown', name='My archive')
++    # -- Error when renaming to an existing archive name ----------------------
++    with pytest.raises(ValueError):
++        manager.rename(identifier=arch_2.identifier(), name=arch_1.name())
+diff --git a/tests/archive/test_snapshot.py b/tests/archive/test_snapshot.py
+index 14fdb3e..c76b72a 100644
+--- a/tests/archive/test_snapshot.py
++++ b/tests/archive/test_snapshot.py
+@@ -19,13 +19,16 @@ def test_append_snapshots():
+     snapshots = SnapshotListing()
+     assert snapshots.is_empty()
+     assert snapshots.last_snapshot() is None
+-    snapshots = snapshots.append()
++    snapshots = snapshots.append(snapshots.next_version())
+     assert not snapshots.is_empty()
+     assert snapshots.last_snapshot() is not None
+     s = snapshots.last_snapshot()
+     assert s.version == 0
+     assert str(s).startswith('<Snapshot')
+-    snapshots = snapshots.append(description='some text')
++    snapshots = snapshots.append(
++        version=snapshots.next_version(),
++        description='some text'
++    )
+     s = snapshots.last_snapshot()
+     assert s.version == 1
+     assert s.description == 'some text'
+diff --git a/tests/cli/test_cli_archive.py b/tests/cli/test_cli_archive.py
+index c78e010..0cac954 100644
+--- a/tests/cli/test_cli_archive.py
++++ b/tests/cli/test_cli_archive.py
+@@ -33,7 +33,7 @@ def test_runner(tmpdir):
+ 
+ 
+ def cleanup():
+-    """Clear base dire environment variable."""
++    """Clear base directory environment variable."""
+     del os.environ[config.ENV_HISTORE_BASEDIR]
+ 
+ 
+diff --git a/tests/test_config.py b/tests/test_config.py
+new file mode 100644
+index 0000000..0c201f6
+--- /dev/null
++++ b/tests/test_config.py
+@@ -0,0 +1,37 @@
++# This file is part of the History Store (histore).
++#
++# Copyright (C) 2018-2020 New York University.
++#
++# The History Store (histore) is released under the Revised BSD License. See
++# file LICENSE for full license details.
++
++"""Unit tests for the configuration helper functions."""
++
++import os
++import pytest
++
++import histore.config as config
++
++
++@pytest.mark.parametrize(
++    'var,func,value,default_is_none',
++    [
++        (config.ENV_HISTORE_BASEDIR, config.BASEDIR, 'ABC', False),
++        (config.ENV_HISTORE_DBCONNECT, config.DBCONNECT, 'XYZ', True),
++        (config.ENV_HISTORE_SORTBUFFER, config.SORTBUFFER, 33.4, False)
++    ]
++)
++def test_get_config(var, func, value, default_is_none):
++    """Test helper functon to get different configuration parameters from the
++    respective environment variables.
++    """
++    # -- Setup ----------------------------------------------------------------
++    if var in os.environ:
++        del os.environ[var]
++    # -- Test default value ---------------------------------------------------
++    assert (func() is None) == default_is_none
++    # -- Test getting value from variable -------------------------------------
++    os.environ[var] = str(value)
++    assert func() == value
++    # -- Cleanup --------------------------------------------------------------
++    del os.environ[var]

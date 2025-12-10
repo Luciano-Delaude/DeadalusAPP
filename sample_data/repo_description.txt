@@ -1,0 +1,144 @@
+## Repository Context
+
+`histore` is a “history store” for datasets: it manages **archives** of tabular data with versioned snapshots, schemas, and metadata. Archives can be:
+
+- **In-memory** (non-persistent).
+- **Persistent on the filesystem** (data + JSON metadata).
+
+Key abstractions:
+
+- `Archive` / `PersistentArchive` (`histore.archive.base`): high-level archive handle.
+- `ArchiveStore` (`histore.archive.store.*`): low-level storage backends (memory, file system).
+- `Snapshot` & `SnapshotListing` (`histore.archive.snapshot`): versioned snapshots metadata.
+- `ArchiveManager` (`histore.archive.manager.base`): manages *sets* of archives, exposing descriptors via `ArchiveDescriptor` (`histore.archive.manager.descriptor`).
+- CLI (`histore/cli`) to init a manager and create/list/delete/rename archives.
+
+Originally, persistent archive managers were filesystem-only; archive descriptors (metadata) were stored as a JSON file in the manager’s base directory.
+
+## Problem Understanding
+
+Issue: **“Add option to maintain archive metadata in database”**.
+
+Requirements:
+
+- Provide an archive manager implementation that stores **archive metadata (descriptors)** in a **relational database** instead of a JSON file.
+- Still keep persistent archives’ **data** on disk in per-archive directories.
+- Offer a **factory** so users/CLI can seamlessly choose between:
+  - Filesystem-based metadata (existing behavior).
+  - Database-backed metadata (new behavior).
+- Extend CLI so that:
+  - Initialization and archive commands can target a DB-managed archive set (via a DB connection string).
+- Adjust core archive APIs so that:
+  - Snapshot creation and commit flows can work cleanly with both backends.
+  - Snapshot versions are allocated before merging data, and commit returns the created snapshot.
+
+Constraints/behavioral expectations:
+
+- New DB manager should use SQLAlchemy and a simple schema (archives table + primary key columns).
+- Environment/config should support a **database connection URL** (`HISTORE_DBCONNECT`) in addition to the base directory.
+- Behavior remains backward compatible: default remains filesystem-based if no DB is configured.
+
+## Golden Patch Summary
+
+The patch implements DB-backed metadata and refactors the persistence API:
+
+1. **New database-backed archive manager**
+   - Added `histore.archive.manager.db` package:
+     - `DB` (`database.py`): thin SQLAlchemy wrapper with `init()` (create/drop tables) and context-managed `session()`.
+     - ORM models in `model.py`:
+       - `Archive` table with id, name (unique), created_at, description, encoder, decoder.
+       - `ArchiveKey` table for ordered primary key columns.
+       - `Archive.descriptor()` builds an `ArchiveDescriptor`.
+     - `DBArchiveManager` (`base.py`): implements `ArchiveManager` using DB:
+       - `archives()`: loads all descriptors from DB.
+       - `create()`: inserts an `Archive` + `ArchiveKey` rows; maps SQLAlchemy errors to `ValueError`.
+       - `get()`: resolves descriptor, then creates a `PersistentArchive` whose data is still in a filesystem directory under `basedir/<archive_id>`.
+       - `delete()`: deletes DB rows and archive directory.
+       - `rename()`: updates archive name in DB.
+
+2. **Persistent manager factory**
+   - New `histore.archive.manager.persist.PersistentArchiveManager`:
+     - If `dbconnect` is given: returns a `DBArchiveManager` with the given DB connection.
+     - Otherwise: returns `FileSystemArchiveManager`.
+   - `histore/__init__.py` now exports this factory as `PersistentArchiveManager`, so existing imports still work.
+
+3. **Filesystem manager refactor**
+   - Old `PersistentArchiveManager` renamed to `FileSystemArchiveManager`.
+   - Constructor changed from `exists` to `create` flag:
+     - `create=True`: clear base directory contents (using new `util.cleardir`) to start fresh.
+     - Always ensures base directory exists; loads `archives.json` if present.
+   - Keeps archive JSON descriptor storage but with clearer lifecycle.
+
+4. **Archive / store API changes**
+   - `SnapshotListing` now:
+     - Has `next_version()` to compute the next snapshot version without mutating state.
+     - `append(version, ...)` now takes explicit `version` and validates it against `next_version()`.
+   - `ArchiveStore.commit` API updated to:
+     - Accept `version`, `valid_time`, `description` instead of a new `SnapshotListing`.
+     - Return the new `Snapshot`.
+   - Memory and file-system stores (`histore.archive.store.mem.base`, `histore.archive.store.fs.base`) updated:
+     - Internally perform `self.snapshots.append(version=..., ...)`.
+     - Update internal state and return `snapshots.last_snapshot()`.
+   - `Archive.commit()` (`histore.archive.base`) updated:
+     - Gets `version = self.snapshots().next_version()`.
+     - Calls `self.store.commit(...)` with that version and metadata.
+     - Returns the `Snapshot` from the store.
+
+5. **CLI integration**
+   - CLI commands now use `histore.PersistentArchiveManager` instead of binding directly to the filesystem manager.
+   - Options:
+     - All relevant commands (`init-manager`, `create-archive`, `delete-archive`, `list-archives`, `rename-archive`) accept `--dbconnect` to target a DB-backed manager.
+   - `init_manager`:
+     - Uses `create=True` to initialize either a filesystem or DB-backed manager, clearing base dir / (re-)creating DB schema.
+   - `get_manager` helper updated to build the correct backend using `dbconnect`.
+
+6. **Config and utilities**
+   - `config.py`:
+     - Adds `ENV_HISTORE_DBCONNECT` and `DBCONNECT()` accessor.
+   - `util.py`:
+     - Adds `current_time()` returning ISO string.
+     - Adds `cleardir(directory)` to clear all files/subdirs.
+     - `ArchiveDescriptor.create` now supports an optional `identifier` and uses `current_time()`; other descriptor methods annotated and unchanged in semantics.
+   - Version/config updates:
+     - Version bumped to `0.1.3`.
+     - Changelog entry added for DB-backed manager.
+     - SQLAlchemy added as a dependency.
+
+Overall, the patch introduces a **DB metadata backend**, a **pluggable persistent manager factory**, and refactors snapshot/commit handling to fit both backends cleanly.
+
+## Core Files List
+
+Core files changed to solve the issue:
+
+- **Archive manager & metadata:**
+  - `histore/archive/manager/base.py`
+  - `histore/archive/manager/mem.py`
+  - `histore/archive/manager/fs.py` (now `FileSystemArchiveManager`)
+  - `histore/archive/manager/persist.py` (new factory)
+  - `histore/archive/manager/descriptor.py`
+
+- **Database backend (new):**
+  - `histore/archive/manager/db/__init__.py`
+  - `histore/archive/manager/db/base.py` (`DBArchiveManager`)
+  - `histore/archive/manager/db/database.py` (`DB` + `SessionScope`)
+  - `histore/archive/manager/db/model.py` (`Archive`, `ArchiveKey`)
+
+- **Archive & store internals:**
+  - `histore/archive/base.py` (archive commit flow)
+  - `histore/archive/snapshot.py` (SnapshotListing & versioning)
+  - `histore/archive/store/base.py` (abstract commit signature)
+  - `histore/archive/store/fs/base.py` (filesystem store commit)
+  - `histore/archive/store/mem/base.py` (memory store commit)
+
+- **CLI and configuration:**
+  - `histore/cli/archive.py`
+  - `histore/cli/base.py`
+  - `histore/config.py`
+  - `histore/util.py`
+
+- **Top-level / packaging:**
+  - `histore/__init__.py`
+  - `histore/version.py`
+  - `changelog.md`
+  - `requirements.txt`
+  - `setup.py`

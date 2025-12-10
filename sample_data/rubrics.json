@@ -1,0 +1,56 @@
+[
+  {
+    "id": "R1",
+    "type": "correctness",
+    "importance": "high",
+    "text": "The patch creates a new file in histore/archive/manager/ to organize database-related code."
+  },
+  {
+    "id": "R2",
+    "type": "style",
+    "importance": "medium",
+    "text": "The patch implements the rename method in the database manager class in histore/archive/manager/db.py that updates the archive name in the database and validates that the new name is unique."
+  },
+  {
+    "id": "R3",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch implements the create method in the database manager class in histore/archive/manager/db.py that inserts a new descriptor into the database and validates that the archive name is unique."
+  },
+  {
+    "id": "R4",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch implements the get method in the database manager class in histore/archive/manager/db.py that retrieves a descriptor from the database and returns a PersistentArchive object pointing to the archive directory in the filesystem."
+  },
+  {
+    "id": "R5",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch exports the new database manager in histore/__init__.py so users can import and use it."
+  },
+  {
+    "id": "R6",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch includes formal tests that validate the database manager functionality, such as creating archives, retrieving them, deleting them, and testing edge cases"
+  },
+  {
+    "id": "R7",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch implements the delete method in the database manager class in histore/archive/manager/db.py that removes both the database record and the archive directory in the filesystem."
+  },
+  {
+    "id": "R8",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch initializes the database schema in the database manager class constructor or initialization method, creating the necessary tables to store archive metadata."
+  },
+  {
+    "id": "R9",
+    "type": "summary",
+    "importance": "low",
+    "text": "The patch includes a summary that explains how to use the database manager, such as examples, usage guides, or implementation notes."
+  }
+]
