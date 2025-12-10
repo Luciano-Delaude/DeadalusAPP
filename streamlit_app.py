@@ -1,4 +1,5 @@
 import json
+import os
 
 import streamlit as st
 
@@ -6,7 +7,13 @@ from rubric_validator import build_messages, call_llm, load_env_file
 
 st.set_page_config(page_title="Rubric Validator", layout="wide")
 
-# Load API key/base URL from .env so the UI stays clean.
+# Load secrets (Streamlit Cloud) and local .env fallback.
+try:
+    secrets_dict = dict(st.secrets)
+except Exception:
+    secrets_dict = {}
+if secrets_dict:
+    os.environ.update(secrets_dict)
 load_env_file(".env")
 
 MODEL_DEFAULT = "gpt-4o-mini"
@@ -23,6 +30,13 @@ MODEL_CHOICES = [
 ]
 st.title("Rubric Validator")
 st.write("Validate rubric quality against a PR context.")
+
+
+def describe_key(key: str | None) -> str:
+    if not key:
+        return "<missing>"
+    return f"present (len={len(key)}, endswith=...{key[-4:]})"
+
 
 # Session state defaults
 default_rubrics = [
@@ -55,6 +69,10 @@ st.markdown("### Model")
 st.session_state["model"] = st.selectbox("Choose model", MODEL_CHOICES, index=MODEL_CHOICES.index(MODEL_DEFAULT))
 repo_description = st.text_area("Repository Description", height=120, key="repo_description")
 pr_diff = st.text_area("PR Diff / Summary", height=200, key="pr_diff")
+
+with st.expander("Debug: environment (keys are masked)"):
+    st.write("OPENAI_BASE_URL:", os.getenv("OPENAI_BASE_URL", "<missing>"))
+    st.write("OPENAI_API_KEY:", describe_key(os.getenv("OPENAI_API_KEY")))
 
 st.markdown("### Rubrics")
 st.write("Add as many as you need. Each rubric has an ID, type, importance, positive flag, and text.")
