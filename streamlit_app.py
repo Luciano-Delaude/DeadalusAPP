@@ -2,31 +2,35 @@ import json
 import os
 
 import streamlit as st
+from streamlit.runtime.secrets import StreamlitSecretNotFoundError
 
-from rubric_validator import build_messages, call_llm, load_env_file
+from rubric_validator import build_messages, call_llm
 
 st.set_page_config(page_title="Rubric Validator", layout="wide")
 
 # Load secrets (Streamlit Cloud) and local .env fallback.
+secrets_dict: dict[str, str] = {}
 try:
-    secrets_dict = dict(st.secrets)
-except Exception:
+    for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ENABLE_DRY_RUN"):
+        if key in st.secrets:
+            val = st.secrets[key]
+            if val is not None:
+                secrets_dict[key] = str(val)
+except StreamlitSecretNotFoundError:
     secrets_dict = {}
 if secrets_dict:
     os.environ.update(secrets_dict)
-load_env_file(".env")
 
-MODEL_DEFAULT = "gpt-4o-mini"
+MODEL_DEFAULT = "openai/gpt-4o-mini"
 MODEL_CHOICES = [
-    "gpt-4o-mini",
-    "gpt-4o",
-    "gpt-5.1",
-    "gpt-4.1",
+    "openai/gpt-4o-mini",
+    "openai/gpt-4o",
+    "openai/gpt-4.1",
+    "openai/gpt-5.1",
+    "openai/gpt-4.1-mini",
     "deepseek/deepseek-chat",
     "deepseek/deepseek-r1",
-    "google/gemini-pro-1.5",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3-opus",
+    "anthropic/claude-3.5-sonnet"
 ]
 st.title("Rubric Validator")
 st.write("Validate rubric quality against a PR context.")
@@ -70,9 +74,35 @@ st.session_state["model"] = st.selectbox("Choose model", MODEL_CHOICES, index=MO
 repo_description = st.text_area("Repository Description", height=120, key="repo_description")
 pr_diff = st.text_area("PR Diff / Summary", height=200, key="pr_diff")
 
-with st.expander("Debug: environment (keys are masked)"):
-    st.write("OPENAI_BASE_URL:", os.getenv("OPENAI_BASE_URL", "<missing>"))
-    st.write("OPENAI_API_KEY:", describe_key(os.getenv("OPENAI_API_KEY")))
+with st.expander("Debug: secrets and environment (keys are masked)"):
+    # Show Streamlit secrets (masked) and whether they exist in os.environ
+    def mask_val(v: str | None) -> str:
+        if not v:
+            return "<missing>"
+        return f"present (len={len(v)}, endswith=...{v[-4:]})"
+
+    try:
+        secrets_preview = {k: mask_val(st.secrets.get(k)) for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ENABLE_DRY_RUN")}
+    except Exception:
+        secrets_preview = {"OPENAI_API_KEY": "<no secrets available>", "OPENAI_BASE_URL": "<no secrets available>", "ENABLE_DRY_RUN": "<no secrets available>"}
+
+    st.write("Streamlit secrets (masked):")
+    st.json(secrets_preview)
+
+    env_preview = {"OPENAI_API_KEY": mask_val(os.getenv("OPENAI_API_KEY")), "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", "<missing>"), "ENABLE_DRY_RUN": os.getenv("ENABLE_DRY_RUN", "<missing>")}
+    st.write("os.environ (masked):")
+    st.json(env_preview)
+
+    if st.button("Sync secrets to env"):
+        try:
+            # Copy known keys from st.secrets into os.environ
+            for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ENABLE_DRY_RUN"):
+                if k in st.secrets and st.secrets[k] is not None:
+                    os.environ[k] = str(st.secrets[k])
+            st.success("Secrets copied to environment. Rerun the action (Validate) now.")
+            st.experimental_rerun()
+        except Exception as exc:
+            st.error(f"Failed to sync secrets: {exc}")
 
 st.markdown("### Rubrics")
 st.write("Add as many as you need. Each rubric has an ID, type, importance, positive flag, and text.")
@@ -211,7 +241,13 @@ def handle(dry: bool):
 
     status_placeholder.info("Calling LLM...")
     try:
-        content = call_llm(messages, st.session_state.get("model", MODEL_DEFAULT), False, None, None)
+        content = call_llm(
+            messages,
+            st.session_state.get("model", MODEL_DEFAULT),
+            False,
+            os.getenv("OPENAI_API_KEY"),
+            os.getenv("OPENAI_BASE_URL"),
+        )
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:

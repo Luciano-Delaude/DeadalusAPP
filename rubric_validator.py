@@ -45,22 +45,6 @@ def format_user_message(repo_description: str, pr_diff: str, rubrics: List[Dict[
     ).strip()
 
 
-def load_env_file(path: str) -> None:
-    """Load key=value pairs from a .env-style file into os.environ if not already set."""
-    if not path or not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
 SYSTEM_PROMPT = dedent(
     """
     You are a senior reviewer who scores rubric quality for evaluating PR review responses.
@@ -169,7 +153,6 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        load_env_file(args.env_file)
         repo_description = read_text(args.repo_description)
         pr_diff = read_text(args.pr_diff)
         rubrics = load_rubrics(args.rubrics)
