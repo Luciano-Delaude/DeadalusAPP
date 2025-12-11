@@ -43,28 +43,12 @@ def describe_key(key: str | None) -> str:
 
 
 # Session state defaults
-default_rubrics = [
-    {
-        "id": "R1",
-        "type": "correctness",
-        "importance": "must-follow",
-        "positive": True,
-        "text": "Function calculate_discount in src/pricing.py must return 0 for negative totals.",
-    },
-    {
-        "id": "R2",
-        "type": "code style",
-        "importance": "good-to-have",
-        "positive": True,
-        "text": "Email subjects and bodies should look consistent.",
-    },
-]
 if "repo_description" not in st.session_state:
     st.session_state["repo_description"] = ""
 if "pr_diff" not in st.session_state:
     st.session_state["pr_diff"] = ""
 if "rubrics" not in st.session_state:
-    st.session_state["rubrics"] = default_rubrics
+    st.session_state["rubrics"] = []
 if "model" not in st.session_state:
     st.session_state["model"] = MODEL_DEFAULT
 
