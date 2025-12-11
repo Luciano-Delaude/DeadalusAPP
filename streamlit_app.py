@@ -58,36 +58,6 @@ st.session_state["model"] = st.selectbox("Choose model", MODEL_CHOICES, index=MO
 repo_description = st.text_area("Repository Description", height=120, key="repo_description")
 pr_diff = st.text_area("PR Diff / Summary", height=200, key="pr_diff")
 
-with st.expander("Debug: secrets and environment (keys are masked)"):
-    # Show Streamlit secrets (masked) and whether they exist in os.environ
-    def mask_val(v: str | None) -> str:
-        if not v:
-            return "<missing>"
-        return f"present (len={len(v)}, endswith=...{v[-4:]})"
-
-    try:
-        secrets_preview = {k: mask_val(st.secrets.get(k)) for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ENABLE_DRY_RUN")}
-    except Exception:
-        secrets_preview = {"OPENAI_API_KEY": "<no secrets available>", "OPENAI_BASE_URL": "<no secrets available>", "ENABLE_DRY_RUN": "<no secrets available>"}
-
-    st.write("Streamlit secrets (masked):")
-    st.json(secrets_preview)
-
-    env_preview = {"OPENAI_API_KEY": mask_val(os.getenv("OPENAI_API_KEY")), "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", "<missing>"), "ENABLE_DRY_RUN": os.getenv("ENABLE_DRY_RUN", "<missing>")}
-    st.write("os.environ (masked):")
-    st.json(env_preview)
-
-    if st.button("Sync secrets to env"):
-        try:
-            # Copy known keys from st.secrets into os.environ
-            for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ENABLE_DRY_RUN"):
-                if k in st.secrets and st.secrets[k] is not None:
-                    os.environ[k] = str(st.secrets[k])
-            st.success("Secrets copied to environment. Rerun the action (Validate) now.")
-            st.experimental_rerun()
-        except Exception as exc:
-            st.error(f"Failed to sync secrets: {exc}")
-
 st.markdown("### Rubrics")
 st.write("Add as many as you need. Each rubric has an ID, type, importance, positive flag, and text.")
 
