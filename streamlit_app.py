@@ -1,10 +1,11 @@
 import json
 import os
-
+from pathlib import Path
 import streamlit as st
 from streamlit.runtime.secrets import StreamlitSecretNotFoundError
-
+from dotenv import load_dotenv
 from rubric_validator import build_messages, call_llm
+from ratings_validator import build_ratings_messages
 
 st.set_page_config(page_title="Rubric Validator", layout="wide")
 
@@ -16,10 +17,18 @@ try:
             val = st.secrets[key]
             if val is not None:
                 secrets_dict[key] = str(val)
-except StreamlitSecretNotFoundError:
-    secrets_dict = {}
+        elif os.environ.get(key) is not None:
+            if key in os.environ:
+                val = os.environ[key]
+                if val is not None:
+                 secrets_dict[key] = os.environ[key]
+except:
+    StreamlitSecretNotFoundError(f"Secret {key} not found in Streamlit secrets or environment.")
+
 if secrets_dict:
     os.environ.update(secrets_dict)
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(str(BASE_DIR / ".env"))
 
 MODEL_DEFAULT = "openai/gpt-4o-mini"
 MODEL_CHOICES = [
@@ -178,6 +187,31 @@ if enable_dry_run:
 status_placeholder = st.empty()
 result_placeholder = st.empty()
 
+# --- Rubric Ratings Validator (new section) ---
+st.markdown("---")
+st.markdown("## Rubric Ratings Validator")
+st.write("Validate rubric ratings/justifications for multiple model responses (e.g., response A/B/C).")
+
+ratings_summary = st.text_area(
+    "Response summary (what the model did; can include response label like A/B/C)",
+    height=120,
+    key="ratings_summary",
+)
+ratings_pr_diff = st.text_area(
+    "PR Diff / Summary for this response",
+    height=200,
+    key="ratings_pr_diff",
+)
+ratings_json_input = st.text_area(
+    "Rubric ratings JSON",
+    height=240,
+    value="",
+    placeholder='{\n  "model_response_0_0": {\n    "rubric_id": {\n      "id": "fully_meets_criterion",\n      "title": "Pass",\n      "score": 1,\n      "color": "green",\n      "justification": "..." \n    }\n  }\n}',
+    key="ratings_json_input",
+)
+ratings_output = st.empty()
+ratings_status = st.empty()
+
 
 def handle(dry: bool):
     rubrics = st.session_state.get("rubrics", [])
@@ -248,3 +282,52 @@ if run:
     handle(False)
 elif dry_run:
     handle(True)
+
+# Ratings validator action
+if st.button("Validate ratings"):
+    try:
+        ratings = json.loads(ratings_json_input or "{}")
+        if not isinstance(ratings, dict):
+            raise ValueError("Ratings JSON must be an object mapping response ids to rubric ratings.")
+    except Exception as exc:
+        ratings_status.error(f"Invalid ratings JSON: {exc}")
+    else:
+        ratings_status.info("Calling LLM for ratings validation...")
+        try:
+            rubric_lookup = {r.get("id"): r for r in st.session_state.get("rubrics", []) if isinstance(r, dict) and r.get("id")}
+            messages = build_ratings_messages(ratings_summary, ratings_pr_diff, ratings, rubric_lookup)
+            content = call_llm(
+                messages,
+                st.session_state.get("model", MODEL_DEFAULT),
+                False,
+                os.getenv("OPENAI_API_KEY"),
+                os.getenv("OPENAI_BASE_URL"),
+            )
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                parsed = {"raw": content}
+
+            feedback = parsed.get("rating_feedback") if isinstance(parsed, dict) else None
+            if feedback and isinstance(feedback, list):
+                for item in feedback:
+                    response_id = item.get("response_id", "")
+                    rubric_id = item.get("rubric_id", "")
+                    verdict = item.get("verdict", "")
+                    verdict_color = "green" if str(verdict).lower() == "ok" else "red"
+                    st.subheader(f"Response {response_id} / Rubric {rubric_id}")
+                    st.markdown(f"**Verdict:** <span style='color:{verdict_color}'>{verdict}</span>", unsafe_allow_html=True)
+                    issues = item.get("issues", [])
+                    if issues:
+                        st.markdown("**Issues:**")
+                        for issue in issues:
+                            st.write(f"- {issue}")
+                    suggested = item.get("suggested_fix", "")
+                    if suggested:
+                        st.markdown("**Suggested fix:**")
+                        st.write(suggested)
+            else:
+                ratings_output.json(parsed)
+            ratings_status.success("Done")
+        except Exception as exc:
+            ratings_status.error(f"Error: {exc}")
