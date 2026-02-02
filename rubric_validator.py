@@ -90,6 +90,12 @@ SYSTEM_PROMPT = dedent(
       "issues": ["bullet pointing the main problems"],
       "suggested_fix": "rewrite that makes it compliant (keep empty if pass)"
     }}
+
+    Suggested fix guidance:
+    - Suggested fixes shouldn't be restrictive; avoid prescribing exact files, methods, or class names unless required by the prompt or diff.
+    - Focus on behavior/logic and observable outcomes so multiple correct implementations can satisfy the rubric.
+    - Use specific file/function anchors only when the rubric itself must be grounded to a specific location in the diff.
+    - Prefer general, testable phrasing (e.g., "adds a test that verifies X behavior") over mirroring the golden patch details.
     """
 ).strip()
 
