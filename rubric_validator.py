@@ -69,6 +69,12 @@ SYSTEM_PROMPT = dedent(
     - agent-behavior: checks reasoning to find the right file/area.
     - summary: checks that the final text response summarizes code changes.
 
+    Atomicity guidance:
+    - Fail atomic if a rubric combines multiple distinct checks (e.g., "adds a Java or Kotlin test" + "reproduces IllegalStateException" + "asserts sessionAttribute doesn't create a new session").
+    - "A or B" is non-atomic when A and B are different checks, languages, files, or behaviors. Treat that as multiple acceptable paths, not one aspect.
+    - Pass atomic only when the rubric is a single check with a single observable outcome; optional details should be truly equivalent ways to verify the same behavior.
+    - If in doubt, mark atomic = false and suggest splitting into separate rubrics.
+
     Return JSON with a list named "rubric_feedback". Each item:
     {{
       "id": "<rubric id>",
