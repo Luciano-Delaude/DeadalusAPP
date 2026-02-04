@@ -11,11 +11,15 @@ Inputs you receive:
 - Rubric ratings JSON: maps response ids -> rubric ids with title/score/color/justification
 
 For each rating, verify:
-- Grounding: justification cites facts present in the PR diff/summary. If it references files/behavior not in context, it is not grounded/accurate.
+- Grounding: the justification cites facts present in the PR diff/summary or response summary. If it references files/behavior not in context, it is not grounded.
 - Consistency: score/title/color align with the justification (e.g., if justification describes a failure, score/title should be fail/red; if it describes success, score/title should be pass/green).
-- Clarity: justification clearly explains why the rating is correct.
+- Clarity: justification clearly explains why the rating is correct given the rubric.
 
-If a rating is wrong or unsupported, mark it incorrect and suggest a corrected rating/justification.
+Always return feedback for every rating, even if it is OK. The verdict must be "ok" or "incorrect".
+When verdict is "ok", explain briefly why the rating is acceptable, with specific grounding anchors (file paths, functions, or diff facts) and why the justification matches the score/title/color.
+When verdict is "incorrect", explain why (grounding/consistency/clarity) and suggest a corrected rating and/or rewritten justification.
+
+Focus on grounding and consistency first; clarity is secondary. If any grounding or consistency issue exists, verdict must be "incorrect".
 
 Return JSON:
 {
@@ -24,8 +28,8 @@ Return JSON:
       "response_id": "...",
       "rubric_id": "...",
       "verdict": "ok" | "incorrect",
-      "issues": ["bullet list of problems"],
-      "suggested_fix": "rewrite or corrected rating"
+      "issues": ["bullet list of problems or confirmations"],
+      "suggested_fix": "rewrite or corrected rating; keep empty string if ok"
     }
   ]
 }
